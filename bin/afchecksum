@@ -1,0 +1,226 @@
+#!/usr/bin/perl -w
+
+# For support with this file, please file an issue on the GitHub issue tracker
+# for this project: https://github.com/spicyjack/App-AudioFileChecksum/issues
+
+=head1 NAME
+
+B<afchecksum> - Checksum and verify audio files (MP3/FLAC/etc.)
+
+=cut
+
+our $copyright = q|Copyright (c)2014 Brian Manning|;
+
+=head1 SYNOPSIS
+
+ afchecksum [OPTIONS]
+
+ Script options:
+ -h|--help          Shows this help text
+ -c|--colorize      Always colorize script output
+ -d|--debug         Debug script execution
+ -v|--verbose       Verbose script execution
+ --version          Print script version and copyright, then exit
+
+ Script file options:
+ -p|--path          Path to search for audio files (MP3, FLAC)
+ -a|--action        Action to perform (see actions below)
+ -s|--checksums     Path to the file containing I<checksum:filename>
+ -f|--filelist      Path to the file containing I<filename:checksum>
+ -x|--overwrite     Overwrite checksum/filelist files, if they exist
+
+ Script '--action' arguments:
+ * checksum         Create checksums, write to --checksums/--filelist
+ * verify           Verify checksums in --checksums/--filelist
+ * checkverify      Verify existing files, checksum new files
+
+ Example usage:
+
+ # Checksum all of the files found in a given path
+ afchecksum --path /path/to/audio/files \
+ --checksum /path/to/file.checksum.txt \
+ --filelist /path/to/file.filelist.txt
+ --action checksum
+
+ # Verify existing checksums
+ afchecksum --path /path/to/audio/files \
+ --checksum /path/to/file.checksum.txt \
+ --filelist /path/to/file.filelist.txt
+ --action checksum
+
+You can view the full C<POD> documentation of this file by calling
+C<perldoc afchecksum>.
+
+=cut
+
+our @options = (
+    # script options
+    q(debug|d),
+    q(verbose|v),
+    q(version),
+    q(help|h),
+    q(colorize|c), # always colorize output
+
+    # other options
+    q(checksum|c=s),
+    q(filelist|o=s),
+    q(overwrite|x),
+    q(action|a=s),
+);
+
+=head1 DESCRIPTION
+
+Creates a list of checksums and filenames for audio files in a given path, or
+verifies checksums of audio files given previously generated checksum/filelist
+files.
+
+=cut
+
+################
+# package main #
+################
+package main;
+
+# pragmas
+use 5.010;
+# https://metacpan.org/pod/strictures
+use strictures 1;
+use utf8;
+
+# system packages
+use Carp;
+use File::Basename; # to create $my_name
+use Log::Log4perl qw(get_logger :no_extra_logdie_message);
+use Log::Log4perl::Level;
+use Pod::Usage;
+
+# Data::Dumper gets it's own block, cause it has extra baggage
+use Data::Dumper;
+$Data::Dumper::Indent = 1;
+$Data::Dumper::Sortkeys = 1;
+$Data::Dumper::Terse = 1;
+
+# local packages
+use App::AudioFileChecksum; # for $VERSION
+use App::AudioFileChecksum::View::CLI;
+
+    # create a variable with the current name of the script
+    my $my_name = basename($0);
+    # provide a version string if dzil hasn't populated modules with $VERSION
+    # scalars
+    my $VERSION = $App::AudioFileChecksum::VERSION || q(git-dev);
+
+    binmode(STDOUT, ":utf8");
+    # create a logger object
+    my $cfg = App::AudioFileChecksum::Config->new(options => \@options);
+    # use Getopt::Long::Parser to parse script arguments
+    $cfg->getopts();
+
+    # dump and bail if we get called with --help
+    if ( $cfg->defined(q(help)) ) { pod2usage(-exitstatus => 1); }
+
+    if ( $cfg->defined(q(version)) ) {
+        print STDERR qq($my_name: version '$VERSION'\n);
+        print STDERR qq($my_name: $copyright\n);
+        exit 0;
+    }
+
+    # create a logger object, and prime the logfile for this session
+    my $log = App::AudioFileChecksum::Logger->new(config => $cfg);
+
+    # Check that the user passed in a valid '--action' parameter
+    my $script_action = $cfg->get(q(action));
+    if ( ! defined $script_action ) {
+        $log->fatal(qq(Missing '--action' argument));
+        $log->logdie(qq(Use '--help' to see all possible script actions));
+    }
+
+    # create a view object
+    my $view = App::AudioFileChecksum::View::GenericCLI->new(config => $cfg);
+    # print a nice banner
+    $view->update(level => q(info),
+        message => qq(Starting $my_name, version '$VERSION'));
+    $view->update(level => q(info), message => qq($copyright));
+    $view->update(level => q(info), message => qq(My PID is $$));
+
+    # check input file before doing any processing
+    $log->logdie(qq(Missing '--checksum' file argument))
+        unless ( $cfg->defined(q(checksum)) );
+    $log->logdie(qq(Can't read checksum file ) . $cfg->get(q(checksum)) )
+        unless ( -r $cfg->get(q(checksum)) );
+    $log->logdie(qq(Missing '--filelist' file argument))
+        unless ( $cfg->defined(q(filelist)) );
+    $log->logdie(qq(Can't read filelist file ) . $cfg->get(q(filelist)) )
+        unless ( -r $cfg->get(q(checksum)) );
+
+
+    # check that we're not overwriting files if --output was used
+    if ( $cfg->defined(q(output)) ) {
+        if ( -e $cfg->get(q(output)) ) {
+            if ( ! $cfg->defined(q(overwrite)) ) {
+                $log->fatal(qq(Output file exists!));
+                $log->fatal(qq(Use '--overwrite' to overwrite output file));
+                $log->logdie(q(Output file: ) . $cfg->get(q(output)));
+            } else {
+                # delete the database file; it will be recreated when the
+                # database handle is instantiated
+                if ( $cfg->get(q(action)) eq q(create-db) ) {
+                    $view->update(level => q(info),
+                        message => q(--output file exists, )
+                            . q(but --overwrite requested;));
+                    $view->update(level => q(info),
+                        message => q(Unlinking old database file...));
+                    unlink( $cfg->get(q(output)) );
+                }
+            }
+        }
+    }
+
+    my $controller = App::AudioFileChecksum::DBTool->new(
+        config => $cfg,
+        view   => $view,
+    );
+
+    ### RUN
+    # call the run() method, which transfers control to the DBTool controller
+    # object
+    my $return = $controller->run();
+
+    # run() will only return if there's an error, or if the script is done
+    # running
+    if ( $return->can(q(is_error)) ) {
+        $return->log_error();
+        $log->error(qq(Use "$my_name --help" to see script options));
+        exit 1;
+    } else {
+        exit 0;
+    }
+
+=head1 AUTHOR
+
+Brian Manning, C<< <brian at xaoc dot org> >>
+
+=head1 BUGS
+
+Please report any bugs or feature requests to the GitHub issue tracker for
+this project:
+
+C<< <https://github.com/spicyjack/public/issues> >>.
+
+=head1 SUPPORT
+
+You can find documentation for this script with the perldoc command.
+
+    perldoc afchecksum
+
+=head1 COPYRIGHT & LICENSE
+
+Copyright (c) 2013-2014 Brian Manning, all rights reserved.
+
+This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
+
+=cut
+
+# fin!
+# vim: set shiftwidth=4 tabstop=4

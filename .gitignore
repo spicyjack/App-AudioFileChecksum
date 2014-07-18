@@ -1,0 +1,6 @@
+# VIM swap files
+*.swp
+# Mac OS X crud
+.DS_Store
+# Any tarballs/distribution directories built by Dist::Zilla
+App-AudioFileChecksum-*
